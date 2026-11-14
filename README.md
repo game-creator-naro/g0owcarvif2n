@@ -1,4 +1,4 @@
-# 無題のゲーム
+# 金太郎飴を作ろう
 
 ▶ 遊ぶ: https://gcn-play.com/play/g0owcarvif2n
 （このゲームが公開されていない間、上の URL は開けません）
