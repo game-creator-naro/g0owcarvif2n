@@ -1,0 +1,23 @@
+{
+  "schema": 1,
+  "gameId": "g0owcarvif2n",
+  "title": "金太郎飴を作ろう",
+  "versionId": "5f20f61e-d228-4e39-8bba-26b1c152b2ba",
+  "snapshotAt": "2026-11-14T12:57:32.575Z",
+  "playUrl": "https://gcn-play.com/play/g0owcarvif2n",
+  "files": [
+    {
+      "path": "README.md",
+      "mime": "text/markdown; charset=utf-8",
+      "bytes": 1874,
+      "sha256": "5c967de1d4804f1ebe50de2dbf465fbfa3645159330569677a3c30a23bcd0db3"
+    },
+    {
+      "path": "index.html",
+      "mime": "text/html; charset=utf-8",
+      "bytes": 56886,
+      "sha256": "da3976940ace042cc5e1d5758132212c673f1e8b967277480ba4364ee40ef9b8"
+    }
+  ],
+  "skipped": []
+}

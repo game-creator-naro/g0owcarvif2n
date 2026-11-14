@@ -1,0 +1,537 @@
+<!doctype html><script>(function(){try{Object.freeze(Object.prototype);Object.freeze(Array.prototype);}catch(e){}})();(function(){var ok=false;try{var A=Reflect.apply,D=Object.defineProperty,G=Object.getOwnPropertyDescriptor;var IP=HTMLInputElement.prototype,EP=Element.prototype,NP=Node.prototype,MP=MutationRecord.prototype,LP=NodeList.prototype;var td=G(IP,"type"),vd=G(IP,"value"),ln=G(EP,"localName").get,nt=G(NP,"nodeType").get;var sa=EP.setAttribute,qa=EP.querySelectorAll,rmv=EP.remove;var rt=G(MP,"type").get,rg=G(MP,"target").get,ra=G(MP,"addedNodes").get,nl=G(LP,"length").get,ni=LP.item;var low=String.prototype.toLowerCase,trim=String.prototype.trim;var need=[A,D,G,td.get,td.set,vd.set,ln,nt,sa,qa,rmv,rt,rg,ra,nl,ni,low,trim];for(var k=0;k<need.length;k++)if(typeof need[k]!=="function")throw new Error("dep");var no=function(){throw new Error("not allowed")};var ban=["setHTMLUnsafe","setHTML"];for(var q=0;q<ban.length;q++)if(ban[q]in EP)D(EP,ban[q],{configurable:false,writable:false,value:no});var banD=["parseHTMLUnsafe","parseHTML"];for(var q2=0;q2<banD.length;q2++)if(banD[q2]in Document)D(Document,banD[q2],{configurable:false,writable:false,value:no});var isPw=function(s){return A(low,A(trim,""+s,[]),[])==="password"};var neutralize=function(n){A(vd.set,n,[""]);A(td.set,n,["text"])};D(IP,"type",{configurable:false,enumerable:td.enumerable,get:function(){return A(td.get,this,[])},set:function(v){var s=""+v;if(isPw(s)){A(vd.set,this,[""]);s="text"}A(td.set,this,[s])}});D(EP,"setAttribute",{configurable:false,writable:false,value:function(n,v){var N=""+n,V=""+v;if(A(low,N,[])==="type"&&A(ln,this,[])==="input"&&isPw(V)){A(vd.set,this,[""]);V="text"}return A(sa,this,[N,V])}});D(EP,"attachShadow",{configurable:false,writable:false,value:no});var fix=function(n){try{if(A(nt,n,[])!==1)return;var l=A(ln,n,[]);if(l==="iframe"||l==="frame"||l==="object"||l==="embed"){A(rmv,n,[]);return}if(l==="input"&&A(td.get,n,[])==="password")neutralize(n)}catch(e){}};var scan=function(n){if(!n||A(nt,n,[])!==1)return;fix(n);var l=A(qa,n,["input,iframe,frame,object,embed"]),c=A(nl,l,[]);for(var i=0;i<c;i++)fix(A(ni,l,[i]))};var mo=new MutationObserver(function(rs){for(var i=0;i<rs.length;i++){var r=rs[i];if(A(rt,r,[])==="attributes")fix(A(rg,r,[]));else{var ad=A(ra,r,[]),c=A(nl,ad,[]);for(var j=0;j<c;j++)scan(A(ni,ad,[j]))}}});mo.observe(document,{subtree:true,childList:true,attributes:true,attributeFilter:["type"]});ok=true}catch(e){}if(!ok){try{window.stop()}catch(e){}throw new Error("GCN hardening failed")}})();</script><script>var __GCN_ASSETS__ = {"images":{},"sfx":{},"music":{},"videos":{},"models":{}};
+// bridge: 自由記述 HTML モード（rtfree-3）向けの依存ゼロ IIFE ブリッジ（D-043・docs/freeform-design.md）。
+// K3 が書いた完全な HTML 文書に、合成時（apps/platform/src/gen/compose.ts の composeFreeform）が
+// <head> 直後へ <script> として 1 本インライン注入する。
+//
+// postMessage プロトコルは games/runtime/gamekit.js と**同一のメッセージ種別・ペイロード形式**を使う。
+// これにより Play.tsx / apps/platform/src/verify/gate-a.ts の受け側は変更不要になる
+// （親 → iframe: {kind:"gamekit-init", versionId, saveData, publicTitle}+port2 / iframe → 親: gamekit-ready
+//   / gamekit-error / gamekit-score / gamekit-save）。
+//
+// 公開 API（apps/platform/src/ai/prompts.ts の buildFreeformReference と同期させること）:
+//   GCN.saveData  … 復元用セーブデータ。init 受信までは null、受信後は渡されたオブジェクト
+//   GCN.publicTitle … プレイページで公開されているゲーム名（文字列）。init 受信までは null。
+//     受信時に document.title と文書内の全 [data-gcn-title] 要素（textContent）へも自動反映する
+//     （rtfree-3 / D-067。canvas に直接描くゲームは GCN.publicTitle || "仮タイトル" の形で読む）
+//   GCN.assets    … 生成素材マニフェスト（images/sfx/music/videos/models。値は URL 文字列）。
+//     __GCN_ASSETS__ グローバル（compose.ts が注入）があればそれを使い、無ければ空マニフェスト
+//   GCN.score(n)   … スコア（数値）を親ページへ送信する
+//   GCN.save(str)  … セーブデータ（JSON 文字列。呼び出し側で JSON.stringify 済みのもの）を送信する
+//   GCN.onInit     … 任意のユーザー定義コールバック（function (saveData) {...}）。
+//     init 受信時に saveData を渡して呼ばれる（生成ロジック側が代入する。未定義なら何もしない）
+//
+// このファイルのソースには script 閉じタグの文字列（山括弧 + スラッシュ + script）を
+// 含めないこと（compose.ts が script 要素として生のまま埋め込むため。含めると HTML パーサが
+//  そこでスクリプトを終端してしまう）。
+(function (global) {
+  "use strict";
+
+  var MAX_REPORTED_ERRORS = 20; // 診断チャネルへの連投防止（同一フレームで例外が続くケース対策）
+  // rtfree-2（D-045）: 自分由来と判定できないエラーの診断枠。自動修正はしないが、
+  // 「ホワイトリストが厳しすぎて本物のエラーを落としていないか」を D1 で測れるように少数だけ通す。
+  // 自分由来の枠（MAX_REPORTED_ERRORS）とは別勘定にして、拡張のノイズが本物のエラーを押し出さないようにする
+  var MAX_FOREIGN_REPORTS = 3;
+  // rtfree-2（D-045 追補 3・codex-review P2-1）: gamekit-init より前のエラーを溜めるキューは
+  // **両方の枠の合計**を収容する。以前は MAX_REPORTED_ERRORS（20）しか無く、self 枠と foreign 枠が
+  // 同じキューを食い合っていた（拡張 3 件の後に自分由来 20 件が来ると 17 件しか入らず、逆順なら
+  // foreign サンプルが全部落ちる）。docs/decisions.md が約束した「別勘定」がここで崩れていた。
+  // reportError は枠ごとの上限を**push より前**に課すので、実際に積まれるのは self ≤ 20 + foreign ≤ 3。
+  var MAX_PENDING_ERRORS = MAX_REPORTED_ERRORS + MAX_FOREIGN_REPORTS;
+  // 診断値の上限（親 → D1 へ運ぶため有界にする）
+  var MAX_SELF_ERROR_COUNT = 9999;
+
+  var diagPort = null;
+  var diagVersionId = null;
+  var reportedErrorCount = 0;
+  var foreignReportCount = 0;
+  var pendingErrors = []; // port 確立前に発生したエラーを溜めておき、確立後にまとめて送る
+  var readyFlag = false; // load + rAF 2 フレーム経過（ready 自動送信の条件その 1）
+  var readySent = false;
+  // rtfree-2（D-045 追補・敵対的検証の指摘 1b）: 自分由来のエラーを何件観測したか。
+  // ready は「読み込みが終わった」ではなく「**起動できた**」の合図でなければならない。
+  // 以前は load + rAF 2 回で無条件送信していたため、起動時の同期例外で真っ黒になった
+  // ゲームでも ready が飛び、親・サーバーが「起動成功した版」と誤認して自動修正を止めていた。
+  // 追補 3（codex-review P1-1）: 件数として持ち、gamekit-ready の payload にも載せる。
+  // 親はこれを HTTP 報告へ転送し、サーバーは「観測エラー付きの ready」を権威にしない
+  // （報告 POST の到達順に依存せず、ランタイム自身の観測を根拠にできる）
+  var selfErrorCount = 0;
+
+  // ==========================================================================
+  // rtfree-2（D-045）: エラーの発生源フィルタ
+  //
+  // 実害: ブラウザ拡張（MetaMask）が注入したスクリプトの例外を gamekit-error として親へ報告し、
+  // 親が「ゲームが壊れた」と誤認して自動修正（= K3 の再生成 = クレジット消費）を走らせていた。
+  //
+  // 方針は**ホワイトリスト**（自分の URL だけ許可）。chrome-extension: / moz-extension: /
+  // safari-web-extension: … といったスキームの**ブラックリスト列挙は採らない** — 拡張の種類は
+  // 無限にあり列挙は必ず漏れるため（同じ教訓を D-044 の静的検査でも得ている）。
+  // ==========================================================================
+
+  // sandbox（allow-same-origin なし）の文書はオペークオリジンで location.origin が "null" に
+  // なるため使えない。URL パーサ自体は文書のオリジン不透明性の影響を受けないので、
+  // location.href を parse して scheme + host を自前で取り出す。
+  var ownOriginPrefix = (function () {
+    try {
+      var parsed = new global.URL(String(global.location.href));
+      if (!parsed.protocol || !parsed.host) {
+        return null;
+      }
+      return parsed.protocol + "//" + parsed.host + "/";
+    } catch (e) {
+      return null;
+    }
+  })();
+
+  function ownDocumentUrl() {
+    try {
+      return String(global.location.href);
+    } catch (e) {
+      return null;
+    }
+  }
+
+  /**
+   * error イベントの filename が「自分の文書（と同一オリジンの素材）」かどうか。
+   * インラインスクリプトの例外では filename に文書 URL がそのまま入り、
+   * 同一オリジンの外部スクリプト（/a/<versionId>/…）ではその URL が入る。どちらも許可する。
+   *
+   * filename が空文字 / undefined のケースは**自分由来と確認できない**ため false に倒す。
+   * opaque-origin sandbox の WebKit では、自文書の inline 例外も filename="" / "Script error." /
+   * 空 stack に匿名化され得るが、拡張等との区別が付かない。親はこの厳密な形だけを
+   * opaque-unattributed として観測し、自動修正には使わない（D-058）。
+   */
+  function isOwnSourceUrl(url) {
+    if (typeof url !== "string" || url === "") {
+      return false;
+    }
+    if (ownOriginPrefix !== null) {
+      return url.slice(0, ownOriginPrefix.length) === ownOriginPrefix;
+    }
+    // オリジンを取り出せない文書（about:blank 等）は文書 URL との完全一致だけを許可する
+    var href = ownDocumentUrl();
+    return href !== null && url === href;
+  }
+
+  /**
+   * unhandledrejection には filename が無いため、reason.stack に自分のオリジンが現れるかで判定する
+   * （ホワイトリスト方針は維持）。stack が無い / オリジンを取り出せない = **判定不能は「自分由来ではない」に倒す**。
+   * 理由: 誤って自分由来とみなすと無駄な K3 再生成（実費）が発生する。一方こちらに倒しても
+   * 診断報告自体は届き（自動修正だけしない）、ユーザーはチャットで修正を指示できる。
+   * 起動失敗の主な形は同期例外（error イベント + filename あり）なので、取りこぼしは限定的。
+   */
+  function stackMentionsOwnSource(stack) {
+    if (typeof stack !== "string" || stack === "" || ownOriginPrefix === null) {
+      return false;
+    }
+    return stack.indexOf(ownOriginPrefix) !== -1;
+  }
+
+  function emptyAssetsManifest() {
+    return { images: {}, sfx: {}, music: {}, videos: {}, models: {} };
+  }
+
+  // compose.ts が bridge スクリプトの直前に `var __GCN_ASSETS__ = {...};` を注入する
+  // （games/runtime/gamekit.js の __GAMEKIT_ASSETS__ と同じ取り込み方式）。
+  // 取り込んだらグローバルからは即座に消す（生成ロジックに生の変数を触らせない）
+  var assetsManifest = (function () {
+    var manifest = global.__GCN_ASSETS__;
+    try {
+      delete global.__GCN_ASSETS__;
+    } catch (e) {}
+    return manifest && typeof manifest === "object" ? manifest : emptyAssetsManifest();
+  })();
+
+  function sendPortMessage(payload) {
+    if (!diagPort) {
+      return;
+    }
+    try {
+      diagPort.postMessage(payload);
+    } catch (e) {
+      // port が閉じている等は握りつぶす（診断送信の失敗でゲーム進行を止めない）
+    }
+  }
+
+  /**
+   * @param selfOrigin false を渡すと「自分由来と確認できないエラー」として扱う（既定は true）。
+   *   親はこの印を見て自動修正（課金）を要求しない。**判定の権威は親**であり、これは親に渡す材料。
+   */
+  function reportError(message, stack, selfOrigin) {
+    var isSelf = selfOrigin !== false;
+    if (isSelf) {
+      // 打ち切り（上限超過）の前に数える。上限に達したあとのエラーでも「起動できていない」
+      // 事実は変わらないため、ready を送らない判断はここで確定させる
+      if (selfErrorCount < MAX_SELF_ERROR_COUNT) {
+        selfErrorCount += 1;
+      }
+      if (reportedErrorCount >= MAX_REPORTED_ERRORS) {
+        return;
+      }
+      reportedErrorCount += 1;
+    } else {
+      if (foreignReportCount >= MAX_FOREIGN_REPORTS) {
+        return;
+      }
+      foreignReportCount += 1;
+    }
+    var payload = {
+      kind: "gamekit-error",
+      versionId: diagVersionId,
+      message: String(message === null || message === undefined ? "unknown error" : message),
+      stack: stack ? String(stack) : undefined,
+      // rtfree-2（D-045）: 親が自動修正を要求してよいかの材料。
+      // selfOrigin=false → 自分のコード由来と確認できない（拡張由来の可能性）
+      // afterReady=true  → gamekit-ready 送信後に起きた（= 起動には成功している）
+      selfOrigin: isSelf,
+      afterReady: readySent
+    };
+    if (!diagPort) {
+      if (pendingErrors.length < MAX_PENDING_ERRORS) {
+        pendingErrors.push(payload);
+      }
+      return;
+    }
+    sendPortMessage(payload);
+  }
+
+  function tryReportReady() {
+    // rtfree-2（D-045 追補）: 自分由来のエラーを 1 件でも観測していたら ready は送らない。
+    // 「起動時に真っ黒 → その後 ready」で自動修正が取りこぼされる後退を塞ぐ。
+    // なおこの判定は ready 送信前だけに効く（送信後のエラーは readySent で先に return する）ため、
+    // 「起動には成功したがプレイ中に落ちた」ゲームの ready は従来どおり有効。
+    if (readySent || !diagPort || !readyFlag || selfErrorCount > 0) {
+      return;
+    }
+    readySent = true;
+    // selfErrorCount は上の条件により常に 0 だが、payload には明示的に載せる（追補 3・P1-1）。
+    // 親・サーバーは「ready と一緒に運ばれてきた観測件数」だけを見れば良く、
+    // gamekit-error の HTTP 報告が失われた／遅れて処理された場合でも判断が壊れない
+    sendPortMessage({ kind: "gamekit-ready", versionId: diagVersionId, selfErrorCount: selfErrorCount });
+  }
+
+  // ==========================================================================
+  // rtfree-3（D-067）: 公開タイトル（親 Play.tsx が gamekit-init に積む games.title）の反映。
+  //
+  // 自由記述モードには GameKit のようなタイトル画面の構造が無いため、「どの要素がタイトルか」は
+  // 文書側が data-gcn-title 属性で宣言する契約にする（docs/freeform-design.md「bridge の仕様」）。
+  // 反映はプッシュ型 — ゲームが先に開始オーバーレイを描いてから init が届く順序が普通に起こるため、
+  // 受信時に既存 DOM を書き換える。描画順に依存しない。
+  //
+  // 置換は textContent 限定で innerHTML は使わない。公開タイトルはクリエイターの自由入力であり、
+  // HTML として解釈させると生成ゲームの文書内へ任意マークアップを流し込めてしまう
+  // （値をデータとしてのみ扱う原則。Play.tsx の toInlineScriptJson と同じ考え方）。
+  //
+  // 受信検証（文字列かつ trim 後が非空）は gamekit.js rt-10 / gamekit3d.js rt3d-3 と同じ形に揃える。
+  // DOM 操作は fail-open: タイトル表示の失敗でゲーム進行や ready 送信を止めない。
+  // ==========================================================================
+  function applyPublicTitle(value) {
+    if (typeof value !== "string") {
+      return;
+    }
+    var title = value.trim();
+    if (title === "") {
+      return;
+    }
+    GCN.publicTitle = title;
+    try {
+      global.document.title = title;
+    } catch (e) {}
+    try {
+      var nodes = global.document.querySelectorAll("[data-gcn-title]");
+      for (var i = 0; i < nodes.length; i++) {
+        nodes[i].textContent = title;
+      }
+    } catch (e) {}
+  }
+
+  // オペークオリジンでは event.origin が "null" になり送信元検証に使えないため、
+  // MessageChannel の port を専有すること自体を認証代わりにする（gamekit.js と同じ考え方）。
+  // compose.ts は正常形 HTML の <head> 直後へ注入し、stopImmediatePropagation で後続の
+  // 生成ロジックへ同じイベント・port を渡さない。ただし malformed な要素順では先行 script を
+  // 原理的に排除できないため、これは defense-in-depth であり権威的制御は Play.tsx 側が担う。
+  global.addEventListener("message", function (event) {
+    var data = event.data;
+    if (!data || data.kind !== "gamekit-init") {
+      return;
+    }
+    event.stopImmediatePropagation();
+    diagVersionId = typeof data.versionId === "string" ? data.versionId : null;
+    if (data.saveData !== undefined && data.saveData !== null && typeof data.saveData === "object") {
+      GCN.saveData = data.saveData;
+    }
+    // rtfree-3（D-067）: port の有無に関係なく反映する（下の early return より前に置く）。
+    // 公開タイトルの表示は診断チャネルとは独立した機能で、port が取れない環境でも出るべきもの
+    applyPublicTitle(data.publicTitle);
+    diagPort = (event.ports && event.ports[0]) || null;
+    if (!diagPort) {
+      return;
+    }
+    for (var i = 0; i < pendingErrors.length; i++) {
+      pendingErrors[i].versionId = diagVersionId;
+      sendPortMessage(pendingErrors[i]);
+    }
+    pendingErrors = [];
+    // rtfree-2（D-045 追補 3・codex-review P1-2）: onInit は **ready より必ず前**に呼ぶ。
+    // onInit はセーブ復元などゲームの初期化を行う場所であり、ここで throw する = 起動できていない。
+    // 以前は init が「load + rAF 2 回」より後に届くと readyFlag が既に true のため、
+    // tryReportReady() → onInit の順になり、onInit の例外が afterReady:true 扱いで報告され、
+    // 親が唯一の自動修正を抑制していた（D-045 で塞いだはずの「起動時の同期例外」の別経路）。
+    // 例外は reportError 経由で selfErrorCount を増やすので、下の tryReportReady が ready を見送る。
+    if (typeof GCN.onInit === "function") {
+      try {
+        GCN.onInit(GCN.saveData);
+      } catch (e) {
+        reportError(e && e.message ? e.message : String(e), e && e.stack);
+      }
+    }
+    // init が ready 条件（load + rAF 2 回）より後に届いた場合はここで即送信、
+    // 先に届いていた場合は load ハンドラ側の tryReportReady が後から送る（順序両対応）
+    tryReportReady();
+  });
+
+  global.addEventListener("error", function (event) {
+    // rtfree-2（D-045）: filename のホワイトリスト判定。自分の文書 / 同一オリジンの素材だけが
+    // 自動修正の候補になる（拡張注入スクリプトは filename が chrome-extension://… 等で弾かれる）
+    reportError(event.message, event.error && event.error.stack, isOwnSourceUrl(event.filename));
+  });
+  global.addEventListener("unhandledrejection", function (event) {
+    var reason = event.reason;
+    var stack = reason && reason.stack;
+    reportError(
+      reason && reason.message ? reason.message : String(reason),
+      stack,
+      stackMentionsOwnSource(stack)
+    );
+  });
+
+  // ready 自動送信: load イベントの後、requestAnimationFrame を 2 回挟んでからフラグを立てる
+  // （1 回だと最初の描画が済む前に ready を送ってしまい得るため。ゲート A の headless 検証が
+  // 最初のスクリーンショットを撮る前に初期描画が済んでいることを期待するため 2 回待つ）。
+  // rtfree-2（D-045 追補）: フラグが立っても、それまでに自分由来のエラーを観測していれば
+  // tryReportReady が送信を見送る（= ready は「読み込み完了」ではなく「起動できた」の合図）。
+  global.addEventListener("load", function () {
+    global.requestAnimationFrame(function () {
+      global.requestAnimationFrame(function () {
+        readyFlag = true;
+        tryReportReady();
+      });
+    });
+  });
+
+  // 送信抑制（ベストエフォートの UX 最適化）: GameKit と違い呼び出し頻度を生成コード側が
+  // 握るため、善意のゲームループ内から毎フレーム呼ばれた場合の MessagePort 連投を減らす。
+  // ただし bridge は未信頼のゲームコードと同一レルムにあり原理的に回避可能なので、これは
+  // セキュリティ境界ではない。D1 POST の権威的な入力・レート・帯域制御は、信頼済み親ページの
+  // Play.tsx が全ランタイム共通で行う（games/runtime/gamekit.js rt-9 の抑制も同じ位置づけ）。
+  // bridge 自身は「先頭即時 + 2 秒クールダウン + 末尾フラッシュ」に抑制する。
+  // クールダウン中の合成則はチャネルごとに異なる: サーバーはスコアを「受信した値のベスト」で
+  // 保持するため、score は最大値を残す（100 → 0 と続いても 100 を失わない）。save は最新値が正。
+  var THROTTLE_MS = 2000;
+  var TEARDOWN_WINDOW_MS = 2000;
+  // teardown 窓内の即時フラッシュ回数上限（チャネル別）。score は本文が数百バイトなので余裕を
+  // 持たせ、save は最大 4KB 強 × keepalive の合計 in-flight 64KiB 制限（Fetch 仕様）を圧迫しない
+  // よう 3 回に絞る（3 × 4KB ≒ 12KB。codex-review 反復 6 P2。現実のゲームの teardown 書き込みは
+  // 1〜2 回であり実質失わない）
+  var TEARDOWN_SCORE_FLUSH_BUDGET = 10;
+  var TEARDOWN_SAVE_FLUSH_BUDGET = 3;
+  // 通常の compose 出力では bridge を生成コードより前へ注入するため、この時点の Date.now /
+  // setTimeout を閉じ込め、後からの偶発的な monkey-patch の影響を減らす（反復 6 P1）。ただし
+  // 不正な HTML 配置等で先行 script が存在し得る以上、未汚染を権威性の根拠にはしない。
+  var nativeDateNow = Date.now;
+  var nativeSetTimeout = global.setTimeout.bind(global);
+  function makeThrottledSender(send, coalesce, teardownBudgetMax) {
+    var cooldown = false;
+    var pending = null;
+    function trigger(value) {
+      cooldown = true;
+      send(value);
+      nativeSetTimeout(function () {
+        cooldown = false;
+        if (pending !== null) {
+          var next = pending;
+          pending = null;
+          trigger(next);
+        }
+      }, THROTTLE_MS);
+    }
+    // teardown 用の即時フラッシュ窓。trusted なライフサイクルイベントを bridge のリスナーが
+    // 観測したときだけ「時間窓 + 回数上限」が付与され、窓内のクールダウン中 submit は即時
+    // フラッシュされる。これにより「ゲーム側の pagehide ハンドラが bridge のフラッシュより後に
+    // GCN.save/score を呼ぶ」順序でも、teardown 中に同一チャネルへ複数回書く正当なゲーム
+    // （pagehide リスナー 2 つ等。codex-review 反復 5 P1）でも最終値を取りこぼさない。
+    // document.visibilityState は Object.defineProperty で偽装できる（反復 4 P1）ため判定に
+    // 使わない — 窓は trusted イベント由来のみで、合成イベント・プロパティ偽装では開かない。
+    // 乱用の上限は「実イベント 1 回あたり teardownBudgetMax 回・TEARDOWN_WINDOW_MS 以内」。
+    // 上限超過後の書き込みは pending に合成されるだけになる（現実のゲームの teardown 書き込みは
+    // 1〜2 回であり実質失わない）
+    var teardownWindowUntil = 0;
+    var teardownFlushBudget = 0;
+    function submit(value) {
+      if (cooldown) {
+        pending = pending === null ? value : coalesce(pending, value);
+        if (teardownFlushBudget > 0 && nativeDateNow() < teardownWindowUntil) {
+          teardownFlushBudget--;
+          submit.flush();
+        }
+        return;
+      }
+      trigger(value);
+    }
+    // ページ破棄時の取りこぼし防止: クールダウン待ちの未送信値を即時送信する
+    // （タイマーはフレーム破棄で消えるため、待っていると親に届かない）
+    submit.flush = function () {
+      if (pending !== null) {
+        var next = pending;
+        pending = null;
+        send(next);
+      }
+    };
+    submit.armTeardownFlush = function () {
+      teardownWindowUntil = nativeDateNow() + TEARDOWN_WINDOW_MS;
+      teardownFlushBudget = teardownBudgetMax;
+    };
+    submit.disarmTeardownFlush = function () {
+      teardownWindowUntil = 0;
+      teardownFlushBudget = 0;
+    };
+    return submit;
+  }
+  var sendScoreThrottled = makeThrottledSender(function (score) {
+    sendPortMessage({ kind: "gamekit-score", versionId: diagVersionId, score: score });
+  }, function (a, b) {
+    return a > b ? a : b;
+  }, TEARDOWN_SCORE_FLUSH_BUDGET);
+  var sendSaveThrottled = makeThrottledSender(function (json) {
+    sendPortMessage({ kind: "gamekit-save", versionId: diagVersionId, data: json });
+  }, function (a, b) {
+    return b;
+  }, TEARDOWN_SAVE_FLUSH_BUDGET);
+  function flushPendingMessages() {
+    sendScoreThrottled.flush();
+    sendSaveThrottled.flush();
+  }
+  function armTeardownFlush() {
+    sendScoreThrottled.armTeardownFlush();
+    sendSaveThrottled.armTeardownFlush();
+  }
+  function disarmTeardownFlush() {
+    sendScoreThrottled.disarmTeardownFlush();
+    sendSaveThrottled.disarmTeardownFlush();
+  }
+  // pagehide は iOS Safari でも発火する。visibilitychange は保険（gamekit.js rt-9 と同じ）。
+  // isTrusted ガード: ゲームコードが dispatchEvent(new Event("pagehide")) で合成イベントを
+  // 連打してもフラッシュ（= スロットリングのバイパス経路）を踏めないようにする。
+  // フラッシュ後に arm するのは、同じイベントディスパッチ内で後から動くゲーム側ハンドラの
+  // GCN.save/score を即時送信するため（時間窓 + 回数上限。makeThrottledSender 参照）。
+  // hidden 判定は偽装可能な visibilityState を見ず「pagehide = 破棄へ向かう」
+  // 「visibilitychange = 表示状態が切り替わった」という trusted イベントの発生自体で扱う。
+  global.addEventListener("pagehide", function (event) {
+    if (event.isTrusted) {
+      flushPendingMessages();
+      armTeardownFlush();
+    }
+  });
+  global.addEventListener("pageshow", function (event) {
+    // bfcache から復帰したら通常のスロットリング動作に戻す（未使用の窓を破棄）
+    if (event.isTrusted) {
+      disarmTeardownFlush();
+    }
+  });
+  global.addEventListener("visibilitychange", function (event) {
+    // hidden への遷移か visible への復帰かを visibilityState で区別しない（偽装可能なため）。
+    // どちら向きでも「未送信分をフラッシュして窓を付与」で統一する — visible 復帰時に短時間の
+    // 即時送信を許すだけで、乱用には trusted イベントの実発生が必要なので有害でない
+    if (event.isTrusted) {
+      flushPendingMessages();
+      armTeardownFlush();
+    }
+  });
+
+  var GCN = {
+    saveData: null,
+    // rtfree-3（D-067）: 公開タイトル。gamekit-init 受信までは null（プレビューでは常に null）
+    publicTitle: null,
+    assets: assetsManifest,
+    onInit: undefined,
+    score: function (n) {
+      if (typeof n !== "number" || !isFinite(n)) {
+        reportError("GCN.score: 数値を渡してください");
+        return;
+      }
+      sendScoreThrottled(Math.floor(n));
+    },
+    save: function (json) {
+      if (typeof json !== "string") {
+        reportError("GCN.save: JSON 文字列を渡してください（JSON.stringify 済みのもの）");
+        return;
+      }
+      sendSaveThrottled(json);
+    }
+  };
+
+  global.GCN = GCN;
+})(window);
+</script>
+<html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><title>こちん、金太郎飴</title><style>
+*{box-sizing:border-box;margin:0}html,body{height:100%;overflow:hidden;background:#fff4dc;color:#243d46;font-family:system-ui,-apple-system,sans-serif;user-select:none;-webkit-user-select:none}button{font:inherit;color:inherit;border:0;cursor:pointer;touch-action:none;-webkit-tap-highlight-color:transparent}button:focus-visible{outline:3px solid #243d46;outline-offset:4px}#c{position:fixed;inset:0;width:100%;height:100%;pointer-events:none}#app{position:fixed;inset:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left)}.screen{position:absolute;inset:0}.screen[hidden], [hidden]{display:none!important}.eyebrow{font-size:13px;letter-spacing:.25em;color:#9b665e;font-weight:800}.heading{position:absolute;top:6%;left:7%;right:7%}h1{font-family:serif;font-size:clamp(25px,7.5vw,38px);letter-spacing:.06em;line-height:1.5}h2{font-family:serif;font-size:25px;letter-spacing:.04em}.hint{font-size:16px;line-height:1.7;color:#6d7a78}.primary{position:absolute;left:13.3%;width:73.4%;height:56px;border-radius:18px;background:#e8798e;box-shadow:0 5px 0 #bd586c,0 12px 24px #c96c7726;color:#fff;font-weight:800;letter-spacing:.08em;font-size:18px}.primary:active{transform:translateY(3px);box-shadow:0 2px 0 #bd586c}.small{background:#fffaf0;border:1px solid #e4d8be;border-radius:14px;min-height:44px;padding:8px 14px;font-size:13px;font-weight:700}#sound{padding:0;white-space:nowrap;display:flex;align-items:center;justify-content:center;position:absolute;right:5%;top:3%;width:48px;height:44px;z-index:4}#title .heading{top:13%;text-align:center}#title .hint{margin-top:10px}#start{top:calc(78% - 28px)}#title .foot{position:absolute;top:88%;width:100%;text-align:center;font-size:13px;letter-spacing:.12em;color:#766157}#paper{position:absolute;left:50%;top:42%;transform:translate(-50%,-50%);border-radius:50%;touch-action:none;box-shadow:0 0 0 7px #fffaf0,0 0 0 9px #ddccb3,0 12px 25px #765e3426;background:#fff4dc}#design .hint{position:absolute;top:16%;width:100%;text-align:center}.palette{position:absolute;top:63%;left:6%;width:88%;display:flex;justify-content:space-between;gap:4px}.swatch{width:44px;height:44px;border-radius:50%;background:var(--color);border:5px solid #fffaf0;box-shadow:0 2px 5px #604c2920}.swatch.selected{outline:3px solid #243d46;outline-offset:2px}.tools{position:absolute;top:73%;left:6%;width:88%;display:flex;gap:5px}.tool{flex:1;min-width:0;height:50px;background:#fffaf0;border:2px solid #eadfc8;border-radius:13px;font-size:13px;line-height:1.2}.tool b{display:block;font-size:20px;font-weight:400;margin-bottom:2px}.tool.selected{border-color:#50a99f;background:#dcf0e7;box-shadow:0 3px 0 #50a99f}#make{top:86%}.tiny{position:absolute;top:96%;width:100%;text-align:center;font-size:13px;color:#766157}#cut .heading{top:5%}.scoreline{display:flex;gap:22px;align-items:baseline;margin-top:8px}.scoreline strong{font-size:32px;font-variant-numeric:tabular-nums}.scoreline span{font-size:13px}#cutHelp{position:absolute;top:68%;width:100%;text-align:center;font-size:16px;line-height:1.7}#chop{top:78%;height:76px;background:#50a99f;box-shadow:0 5px 0 #347f78,0 12px 24px #337c7620}#chop span{display:block;font-size:13px;letter-spacing:0;margin-top:4px;font-weight:500}#result .heading{text-align:center;top:5%}#total{font-size:42px;font-weight:800;line-height:1.2}#counts{display:flex;justify-content:center;gap:20px;margin-top:10px;font-size:13px;letter-spacing:.03em}#counts b{display:block;font-size:23px}#summary{position:absolute;top:68%;width:100%;text-align:center;font-size:13px}#imageButton{position:absolute;top:75%;left:22%;width:56%}#again{top:86%}#preview{position:absolute;inset:0;z-index:8;background:#243d46ed;display:flex;align-items:center;justify-content:center;padding:22px}#preview canvas{max-width:100%;max-height:80%;height:auto;border-radius:20px;box-shadow:0 12px 60px #0005}#close{position:absolute;top:3%;right:5%;min-width:48px}#preview p{position:absolute;bottom:4%;font-size:13px;color:#fff4dc;text-align:center} @media(min-aspect-ratio: 1/1){#design .heading{left:5%;top:8%}#design .hint{top:26%;width:48%}#paper{left:25%;top:60%}.palette{left:53%;width:42%;top:28%}.tools{left:53%;width:42%;top:49%}#make{left:56%;width:36%;top:74%}.tiny{display:none}#title .heading{top:7%}#title h1{font-size:30px}#start{left:58%;width:33%;top:64%}#title .foot{left:54%;width:40%}#cut .heading{left:5%;top:6%}#chop{left:58%;width:35%;top:70%}#cutHelp{left:52%;width:44%;top:46%}#result .heading{left:53%;width:43%;top:8%}#counts{gap:14px}#summary{left:53%;width:43%;top:54%}#imageButton{left:59%;width:31%;top:63%}#again{left:56%;width:36%;top:81%}}
+</style></head><body data-gcn-state="title"><canvas id="c"></canvas><main id="app"><button id="sound" class="small" type="button" aria-label="音の切り替え">音 ♪</button><section id="title" class="screen"><div class="heading"><div class="eyebrow">あなただけの、小さな飴工房</div><h1 data-gcn-title>こちん、金太郎飴</h1><p class="hint">もようを描いて、18枚の飴に。<br>幅がそろうほど高得点。</p></div><button id="start" type="button" class="primary">飴づくりをはじめる</button><div class="foot">お絵かき × こちん、とタイミング</div></section><section id="design" class="screen" hidden><div class="heading"><div class="eyebrow">一　／　仕立てる</div><h2>もようを描く</h2></div><p class="hint">指でなぞって、あなただけの断面に。</p><canvas id="paper" width="256" height="256" aria-label="円形のお絵かきキャンバス"></canvas><div class="palette" id="palette"></div><div class="tools" id="tools"></div><button type="button" class="primary" id="make">このもようを飴にする →</button><p class="tiny">何も描き足さずに、そのまま進んでも大丈夫。</p></section><section id="cut" class="screen" hidden><div class="heading"><div class="eyebrow">二　／　切りそろえる</div><div class="scoreline"><strong id="score">0</strong><span>点　<span id="number">0</span>／18枚</span></div></div><p id="cutHelp">目盛りが重なるときに、こちん。<br>目標32.4px ・ 約0.9秒に1回</p><button type="button" id="chop" class="primary">こちん、と切る<span>ここをタップ</span></button></section><section id="result" class="screen" hidden><div class="heading"><div class="eyebrow">三　／　できあがり</div><h2>あなたの飴、ひとそろい。</h2><div id="total">0 <small style="font-size:16px">点</small></div><div id="counts"></div></div><p id="summary"></p><button type="button" class="small" id="imageButton">作品画像を大きく見る</button><button type="button" class="primary" id="again">もう一度作る</button></section><div id="preview" hidden><button type="button" id="close" class="small">閉じる ×</button><canvas id="photo" width="720" height="900"></canvas><p>作品の記念に、スクリーンショットをどうぞ。</p></div></main><script>
+(function(){
+'use strict';
+var cv=document.getElementById('c'),ctx=cv.getContext('2d'),paper=document.getElementById('paper'),ink=paper.getContext('2d',{willReadFrequently:true}),app=document.getElementById('app'),W,H,D,area,land=false;
+var state='title',colors=['#ef7991','#50b7ad','#f6c65b','#9b86bd','#ffffff','#243d46'],color=colors[0],tool=0,best=0,score=0,grades=[0,0,0],slices=[],cuts=0,lastCut=0,elapsed=0,countdown=1.8,origin=0,knife=0,pop=0,label='',labelColor='#50a99f',particles=[],tick=0,shake=0,cutStamp=-99,muted=false;
+var ac=null,AC=window.AudioContext||window.webkitAudioContext,nextNote=0,noteIndex=0,clockAudio=false;
+GCN.onInit=function(s){if(typeof s==='string'){try{s=JSON.parse(s);}catch(e){s=null;}}if(s&&typeof s.best==='number')best=Math.max(best,s.best);};
+function resize(){D=Math.min(devicePixelRatio||1,2);W=innerWidth;H=innerHeight;cv.width=Math.round(W*D);cv.height=Math.round(H*D);area=app.getBoundingClientRect();land=area.width>area.height;var size=Math.min(224,area.width*.62,area.height*(land?.54:.36));paper.style.width=size+'px';paper.style.height=size+'px';}window.addEventListener('resize',resize);resize();
+function clock(){return clockAudio&&ac?ac.currentTime-(ac.outputLatency||ac.baseLatency||0):performance.now()/1000;}
+function unlockAudio(){try{if(!ac&&AC)ac=new AC();if(ac&&ac.state==='suspended'){var p=ac.resume();if(p&&p.catch)p.catch(function(){});}nextNote=ac?ac.currentTime:0;}catch(e){ac=null;}}
+function tone(freq,dur,delay,vol){if(!ac||muted)return;try{var n=ac.currentTime+(delay||0),o=ac.createOscillator(),g=ac.createGain();o.type='sine';o.frequency.setValueAtTime(freq,n);g.gain.setValueAtTime(0,n);g.gain.linearRampToValueAtTime(vol||.09,n+.005);g.gain.exponentialRampToValueAtTime(.001,n+dur);o.connect(g);g.connect(ac.destination);o.start(n);o.stop(n+dur+.01);}catch(e){}}
+function cutSound(){if(!ac||muted)return;try{var n=ac.currentTime,b=ac.createBuffer(1,Math.ceil(ac.sampleRate*.06),ac.sampleRate),d=b.getChannelData(0);for(var i=0;i<d.length;i++)d[i]=(Math.random()*2-1);var source=ac.createBufferSource(),g=ac.createGain();source.buffer=b;g.gain.setValueAtTime(.13,n);g.gain.exponentialRampToValueAtTime(.001,n+.06);source.connect(g);g.connect(ac.destination);source.start(n);source.stop(n+.06);}catch(e){}}
+function bind(id,fn){var b=typeof id==='string'?document.getElementById(id):id,last=-1000;b.addEventListener('pointerdown',function(e){e.preventDefault();last=performance.now();fn();});b.addEventListener('touchstart',function(e){e.preventDefault();if(performance.now()-last<80)return;last=performance.now();fn();},{passive:false});b.addEventListener('click',function(){if(performance.now()-last<450)return;last=performance.now();fn();});}
+function change(s){state=s;['title','design','cut','result'].forEach(function(id){document.getElementById(id).hidden=id!==s;});document.body.setAttribute('data-gcn-state',s==='title'?'title':s==='result'?'ended':'playing');}
+bind('start',function(){if(state!=='title')return;change('design');try{unlockAudio();tone(660,.12);}catch(e){}});
+bind('sound',function(){muted=!muted;document.getElementById('sound').textContent=muted?'音 ×':'音 ♪';try{unlockAudio();}catch(e){}});
+colors.forEach(function(c,i){var b=document.createElement('button');b.type='button';b.className='swatch'+(i===0?' selected':'');b.style.setProperty('--color',c);b.setAttribute('aria-label',['桃','青緑','黄','紫','白','墨'][i]);b.setAttribute('aria-pressed',i===0?'true':'false');document.getElementById('palette').appendChild(b);bind(b,function(){color=c;document.querySelectorAll('.swatch').forEach(function(n){n.classList.toggle('selected',n===b);n.setAttribute('aria-pressed',n===b?'true':'false');});tone(700+i*60,.08);});});
+['✎|ペン','▧|塗る','★|星','♥|ハート','◇|消す'].forEach(function(v,i){var b=document.createElement('button');b.type='button';b.className='tool'+(i===0?' selected':'');var a=v.split('|');b.innerHTML='<b>'+a[0]+'</b>'+a[1];b.setAttribute('aria-pressed',i===0?'true':'false');document.getElementById('tools').appendChild(b);bind(b,function(){tool=i;document.querySelectorAll('.tool').forEach(function(n){n.classList.toggle('selected',n===b);n.setAttribute('aria-pressed',n===b?'true':'false');});tone(520,.1);});});
+function clip(){ink.beginPath();ink.arc(128,128,125,0,Math.PI*2);ink.clip();}
+function stamp(x,y,kind,size){ink.save();clip();ink.translate(x,y);ink.fillStyle=color;ink.beginPath();if(kind===2){for(var i=0;i<10;i++){var a=-Math.PI/2+i*Math.PI/5,r=i%2?size*.45:size;ink.lineTo(Math.cos(a)*r,Math.sin(a)*r);}ink.closePath();}else{ink.moveTo(0,size*.85);ink.bezierCurveTo(-size*1.8,-size*.25,-size*.8,-size*1.6,0,-size*.55);ink.bezierCurveTo(size*.8,-size*1.6,size*1.8,-size*.25,0,size*.85);}ink.fill();ink.restore();}
+function initialPattern(){ink.fillStyle='#fff4dc';ink.fillRect(0,0,256,256);var old=color;color='#f8c5c9';for(var i=0;i<5;i++){var a=i*Math.PI*2/5;ink.beginPath();ink.ellipse(128+Math.sin(a)*28,128-Math.cos(a)*28,20,32,a,0,Math.PI*2);ink.fillStyle=color;ink.fill();}ink.fillStyle='#f6c65b';ink.beginPath();ink.arc(128,128,14,0,7);ink.fill();color=old;}initialPattern();
+function fillAt(x,y){var data=ink.getImageData(0,0,256,256),d=data.data,sx=Math.max(0,Math.min(255,x|0)),sy=Math.max(0,Math.min(255,y|0)),start=(sy*256+sx)*4,target=[d[start],d[start+1],d[start+2]],rgb=[parseInt(color.slice(1,3),16),parseInt(color.slice(3,5),16),parseInt(color.slice(5,7),16)];if(target.every(function(v,i){return v===rgb[i];}))return;var seen=new Uint8Array(65536),stack=[sy*256+sx];while(stack.length){var p=stack.pop();if(seen[p])continue;seen[p]=1;var px=p%256,py=(p/256)|0,k=p*4;if((px-128)*(px-128)+(py-128)*(py-128)>125*125)continue;if(Math.abs(d[k]-target[0])+Math.abs(d[k+1]-target[1])+Math.abs(d[k+2]-target[2])>35)continue;d[k]=rgb[0];d[k+1]=rgb[1];d[k+2]=rgb[2];if(px>0)stack.push(p-1);if(px<255)stack.push(p+1);if(py>0)stack.push(p-256);if(py<255)stack.push(p+256);}ink.putImageData(data,0,0);}
+var active=false,pid=null,tid=null,previous=null;
+function point(x,y){var r=paper.getBoundingClientRect();return{x:(x-r.left)*256/r.width,y:(y-r.top)*256/r.height};}
+function begin(x,y){if(state!=='design'||active)return;var p=point(x,y);if(Math.hypot(p.x-128,p.y-128)>125)return;active=true;previous=p;if(tool===1)fillAt(p.x,p.y);else if(tool===2||tool===3){stamp(p.x,p.y,tool,25);tone(400,.13);}else paint(p,p);}
+function paint(a,b){ink.save();clip();ink.strokeStyle=tool===4?'#fff4dc':color;ink.fillStyle=ink.strokeStyle;ink.lineWidth=tool===4?29:16;ink.lineCap='round';ink.lineJoin='round';ink.beginPath();ink.moveTo(a.x,a.y);ink.lineTo(b.x,b.y);ink.stroke();ink.beginPath();ink.arc(b.x,b.y,ink.lineWidth/2,0,7);ink.fill();ink.restore();}
+function move(x,y){if(!active)return;var p=point(x,y);if(tool===0||tool===4)paint(previous,p);previous=p;}
+function end(){if(pid===null&&tid===null){active=false;previous=null;}}
+function finishPointer(e){if(e.pointerId===pid)pid=null;end();}
+function finishTouch(e){e.preventDefault();for(var i=0;i<e.changedTouches.length;i++)if(e.changedTouches[i].identifier===tid)tid=null;end();}
+paper.addEventListener('pointerdown',function(e){e.preventDefault();if(pid!==null)return;pid=e.pointerId;try{paper.setPointerCapture(e.pointerId);}catch(err){}begin(e.clientX,e.clientY);});paper.addEventListener('pointermove',function(e){if(e.pointerId===pid)move(e.clientX,e.clientY);});paper.addEventListener('pointerup',finishPointer);paper.addEventListener('pointercancel',finishPointer);paper.addEventListener('touchstart',function(e){e.preventDefault();if(tid!==null)return;var t=e.changedTouches[0];tid=t.identifier;begin(t.clientX,t.clientY);},{passive:false});paper.addEventListener('touchmove',function(e){e.preventDefault();for(var i=0;i<e.changedTouches.length;i++){var t=e.changedTouches[i];if(t.identifier===tid)move(t.clientX,t.clientY);}},{passive:false});paper.addEventListener('touchend',finishTouch,{passive:false});paper.addEventListener('touchcancel',finishTouch,{passive:false});
+bind('make',function(){if(state!=='design')return;change('cut');score=0;grades=[0,0,0];slices=[];cuts=0;elapsed=0;lastCut=0;knife=0;pop=0;cutStamp=-99;clockAudio=!!(ac&&ac.state==='running');origin=clock()+1.8;countdown=1.8;document.getElementById('score').textContent=0;document.getElementById('number').textContent=0;nextNote=ac?ac.currentTime:0;});
+function emit(){for(var i=0;i<14;i++)particles.push({x:W*.48,y:H*.48,vx:(Math.random()-.5)*160,vy:-40-Math.random()*100,life:.5,c:colors[i%4]});}
+function award(width,forced){var error=Math.abs(width-32.4),g=forced?2:error<=3.24+1e-9?0:error<=7.92+1e-9?1:2;score+=[300,100,10][g];grades[g]++;slices.forEach(function(s){s.age=.25;});slices.push({width:width,grade:g,age:0});document.getElementById('score').textContent=score;document.getElementById('number').textContent=slices.length;label=['PERFECT','GOOD','BAD'][g];labelColor=['#329e91','#b58a25','#dc633f'][g];pop=.65;knife=.18;shake=g===0?3:1;emit();cutSound();tone(g===2?190:1100,.09);if(g<2){tone(g===0?1397:880,.13,.07);if(g===0)tone(1760,.2,.13);}}
+function chop(){if(state!=='cut'||countdown>0)return;var now=Math.max(0,clock()-origin);if(now>=16.2){finish();return;}if(now-cutStamp<.18)return;cutStamp=now;var at=Math.min(583.2,now*36);award(at-lastCut,false);lastCut=at;cuts++;if(cuts>=18)finish();}
+bind('chop',chop);window.addEventListener('keydown',function(e){if(e.code==='Space'&&state==='cut'){e.preventDefault();if(!e.repeat)chop();}});
+function finish(){if(state!=='cut')return;if(cuts<18&&lastCut<583.2)award(583.2-lastCut,true);change('result');document.getElementById('total').innerHTML=score+' <small style="font-size:16px">点</small>';document.getElementById('counts').innerHTML=['PERFECT','GOOD','BAD'].map(function(s,i){return '<div style="color:'+['#329e91','#b58a25','#dc633f'][i]+'">'+s+'<b>'+grades[i]+'</b></div>';}).join('');best=Math.max(best,score);document.getElementById('summary').textContent=cuts+'回カット ・ '+slices.length+'枚完成 ／ 最高 '+best+'点';GCN.score(score);GCN.save(JSON.stringify({best:best}));makePhoto();}
+bind('again',function(){change('design');score=0;grades=[0,0,0];cuts=0;slices=[];color=colors[0];tool=0;document.querySelectorAll('.swatch').forEach(function(n,i){n.classList.toggle('selected',i===0);n.setAttribute('aria-pressed',i===0?'true':'false');});document.querySelectorAll('.tool').forEach(function(n,i){n.classList.toggle('selected',i===0);n.setAttribute('aria-pressed',i===0?'true':'false');});tone(660,.1);});bind('imageButton',function(){document.getElementById('preview').hidden=false;});bind('close',function(){document.getElementById('preview').hidden=true;});
+function round(c,x,y,w,h,r,fill){c.beginPath();c.moveTo(x+r,y);c.arcTo(x+w,y,x+w,y+h,r);c.arcTo(x+w,y+h,x,y+h,r);c.arcTo(x,y+h,x,y,r);c.arcTo(x,y,x+w,y,r);c.closePath();c.fillStyle=fill;c.fill();}
+function face(c,x,y,rx,ry,angle){c.save();c.translate(x,y);c.rotate(angle||0);c.fillStyle='#c58f79';c.beginPath();c.ellipse(2,5,rx+3,ry+3,0,0,7);c.fill();c.save();c.beginPath();c.ellipse(0,0,rx,ry,0,0,7);c.clip();c.drawImage(paper,-rx,-ry,rx*2,ry*2);var g=c.createLinearGradient(-rx,-ry,rx,ry);g.addColorStop(0,'#ffffff80');g.addColorStop(.5,'#ffffff00');g.addColorStop(1,'#243d4629');c.fillStyle=g;c.fillRect(-rx,-ry,rx*2,ry*2);c.restore();c.strokeStyle='#fff9e9';c.lineWidth=4;c.beginPath();c.ellipse(0,0,rx,ry,0,0,7);c.stroke();c.restore();}
+function rod(c,x,y,size,feed){feed=feed||0;c.save();c.translate(x,y);c.rotate(-.25);var len=size*2.5,r=size*.48;c.translate(feed*.5,0);len+=feed;var g=c.createLinearGradient(0,-r,0,r);g.addColorStop(0,'#fff0dc');g.addColorStop(.22,'#f9a0ae');g.addColorStop(.65,'#d97996');g.addColorStop(1,'#985e77');c.fillStyle=g;c.beginPath();c.moveTo(-len/2,-r);c.lineTo(len/2,-r);c.ellipse(len/2,0,size*.55,r,0,-Math.PI/2,Math.PI/2);c.lineTo(-len/2,r);c.closePath();c.fill();for(var i=0;i<7;i++){c.strokeStyle=i%2?'#fff4dc70':'#f6c65b66';c.lineWidth=5;c.beginPath();c.moveTo(-len/2,-r+8+i*r*.24);c.lineTo(len/2,-r+8+i*r*.24);c.stroke();}c.strokeStyle='#fff9';c.lineWidth=3;c.beginPath();c.moveTo(-len/2,-r+7);c.lineTo(len/2,-r+7);c.stroke();face(c,len/2,0,size*.55,r);c.restore();}
+function cutGeometry(w,h,wide,feed){
+// 搬送の論理長は変えず、断面と包丁の柄・揺れが収まる可視長だけを制限する。
+var y=h*(wide?.62:.43),size=Math.min(w*(wide?.13:.19),76),angle=-.25,edge=wide?w*.52-12:w-16;
+var x=Math.min(w*(wide?.29:.40),edge-84-Math.cos(angle)*(size*1.25+40));
+var maxFeed=Math.max(0,(edge-84-x)/Math.cos(angle)-size*1.25),visibleFeed=Math.min(maxFeed,Math.max(0,feed)),tip=size*1.25+visibleFeed;
+return{x:x,y:y,size:size,angle:angle,feed:visibleFeed,tipX:x+Math.cos(angle)*tip,tipY:y+Math.sin(angle)*tip};}
+function cutTray(w,h,wide){var x=w*(wide?.055:.07),y=h*(wide?.79:.545),width=w*(wide?.4:.86),height=h*(wide?.18:.115),cell=width/6,row=height/3;return{x:x,y:y,width:width,height:height,cell:cell,row:row,rx:Math.min(21,cell*.38,row*.66),ry:Math.min(17,cell*.30,row*.48)};}
+function piece(c,x,y,rx,ry,width,angle){var thick=Math.max(1.5,Math.min(rx*.95,width*rx/90));c.save();c.translate(x,y);c.rotate(angle||0);var g=c.createLinearGradient(0,-ry,0,ry);g.addColorStop(0,'#fff4dc');g.addColorStop(.4,'#f4a3af');g.addColorStop(1,'#ae6b83');c.fillStyle=g;c.beginPath();c.ellipse(-thick,0,rx,ry,0,0,7);c.fill();c.fillRect(-thick,-ry,thick,ry*2);face(c,0,0,rx,ry);c.restore();}
+function tray(c,x,y,w,h,count){c.save();c.shadowColor='#775a3720';c.shadowBlur=20;c.shadowOffsetY=10;round(c,x,y,w,h,22,'#fffaf0');c.restore();c.strokeStyle='#e2cfaa';c.lineWidth=1;c.strokeRect(x+13,y+13,w-26,h-26);var cols=6,rows=Math.max(1,Math.ceil(count/cols)),sx=w/7,sy=Math.min(h/(rows+1),h*.25),r=Math.min(sx*.35,25);for(var i=0;i<count;i++){var xx=x+sx*(1+i%6),yy=y+(h-sy*(rows-1))/2+Math.floor(i/6)*sy;piece(c,xx,yy,r,r*.82,slices[i].width,(i%3-1)*.07);} }
+function makePhoto(){var p=document.getElementById('photo'),c=p.getContext('2d');c.fillStyle='#fff4dc';c.fillRect(0,0,720,900);c.fillStyle='#9b665e';c.font='18px sans-serif';c.textAlign='center';c.fillText('あなただけの、小さな飴工房',360,80);c.fillStyle='#243d46';c.font='bold 38px serif';c.fillText(GCN.publicTitle||'こちん、金太郎飴',360,145);tray(c,40,210,640,400,slices.length);c.fillStyle='#243d46';c.font='bold 64px sans-serif';c.fillText(score+' 点',360,725);c.font='18px sans-serif';c.fillText('PERFECT '+grades[0]+'   GOOD '+grades[1]+'   BAD '+grades[2],360,780);c.fillStyle='#766157';c.fillText('ひと切れずつ、私のもよう。',360,845);}
+function update(dt){tick+=dt;slices.forEach(function(s){s.age=Math.min(.25,s.age+dt);});knife=Math.max(0,knife-dt);pop=Math.max(0,pop-dt);shake=Math.max(0,shake-dt*25);for(var i=particles.length-1;i>=0;i--){var p=particles[i];p.x+=p.vx*dt;p.y+=p.vy*dt;p.vy+=300*dt;p.life-=dt;if(p.life<=0)particles.splice(i,1);}if(state==='cut'){countdown=Math.max(0,origin-clock());elapsed=Math.max(0,clock()-origin);if(elapsed>=16.2)finish();}if(ac&&!muted&&(state==='design'||state==='cut')){if(nextNote<ac.currentTime-.2)nextNote=ac.currentTime;if(nextNote<ac.currentTime+.08){var freq=[523.25,587.33,659.25,783.99,880,783.99,659.25,587.33][noteIndex%8];tone(freq,state==='design'?.45:.16,Math.max(0,nextNote-ac.currentTime),state==='design'?.025:.035);noteIndex++;nextNote+=state==='design'?.75:.45;}}}
+function text(s,x,y,size,color){ctx.fillStyle=color||'#243d46';ctx.font='700 '+Math.max(13,size)+'px system-ui,sans-serif';ctx.textAlign='center';ctx.fillText(s,x,y);}
+function draw(){ctx.setTransform(D,0,0,D,0,0);var bg=ctx.createLinearGradient(0,0,W,H);bg.addColorStop(0,'#fff8e8');bg.addColorStop(1,'#f8e6dc');ctx.fillStyle=bg;ctx.fillRect(0,0,W,H);ctx.strokeStyle='#bca78312';ctx.lineWidth=1;for(var x=0;x<W;x+=24){ctx.beginPath();ctx.moveTo(x,0);ctx.lineTo(x,H);ctx.stroke();}for(var y=0;y<H;y+=24){ctx.beginPath();ctx.moveTo(0,y);ctx.lineTo(W,y);ctx.stroke();}for(var i=0;i<120;i++){ctx.fillStyle='#9476590c';ctx.fillRect((i*137.7)%W,(i*83.9)%H,2,2);}ctx.save();ctx.translate(area.left,area.top);var w=area.width,h=area.height;
+if(state==='title'){var cx=land?w*.28:w*.5,cy=land?h*.65:h*.51;ctx.save();ctx.translate(cx,cy);ctx.rotate(-.07);round(ctx,-w*(land?.22:.4),-h*.13,w*(land?.44:.8),h*.29,24,'#e8d9bc');ctx.restore();rod(ctx,cx-18,cy-15,Math.min(w*.19,75));face(ctx,cx+83,cy+42,31,26,.16);text('手づくりのもようが、飴になる。',cx,cy+h*.2,13,'#9b665e');}
+if(state==='design'){ctx.strokeStyle='#d5b897';ctx.setLineDash([2,6]);ctx.beginPath();ctx.arc(w*(land?.25:.5),h*(land?.6:.42),parseFloat(paper.style.width)/2+17,0,7);ctx.stroke();ctx.setLineDash([]);}
+if(state==='cut'){var gx=land?w*.07:w*.1,gy=h*(land?.39:.23),gw=land?w*.4:w*.8;round(ctx,gx,gy,gw,57,16,'#fffaf0');var frac=((elapsed*36-lastCut)/32.4),center=gx+gw*.5,unit=gw*.27;ctx.save();ctx.beginPath();ctx.rect(gx,gy,gw,57);ctx.clip();if(slices.length<12){ctx.fillStyle=slices.length<6?'#50b7ad3d':'#50b7ad19';ctx.fillRect(center-unit*.10,gy,unit*.20,57);}for(var j=-4;j<8;j++){var mx=center+(j+1-frac)*unit;ctx.strokeStyle='#9caba4';ctx.lineWidth=2;ctx.beginPath();ctx.moveTo(mx,gy+12);ctx.lineTo(mx,gy+41);ctx.stroke();}ctx.restore();ctx.fillStyle='#e8798e';ctx.beginPath();ctx.moveTo(center-6,gy-5);ctx.lineTo(center+6,gy-5);ctx.lineTo(center,gy+5);ctx.fill();text('ここで切る',center,gy+75,13,'#766157');var feed=Math.max(0,elapsed*36-lastCut),latest=slices[slices.length-1];if(latest&&latest.age<.25)feed+=latest.width*Math.pow(1-latest.age/.25,3);var geom=cutGeometry(w,h,land,feed),rx=geom.x,ry=geom.y,sz=geom.size,ct=cutTray(w,h,land);round(ctx,ct.x,ct.y,ct.width,ct.height,12,'#e8d9bc');round(ctx,ct.x+3,ct.y+3,ct.width-6,ct.height-6,10,'#fffaf0');ctx.save();ctx.translate(Math.sin(tick*57)*shake,Math.cos(tick*63)*shake);ctx.fillStyle='#72533816';ctx.beginPath();ctx.ellipse(rx,ry+sz*.7,sz*1.8,sz*.33,-.2,0,7);ctx.fill();rod(ctx,rx,ry,sz,geom.feed);for(var si=0;si<slices.length;si++){var sl=slices[si],tx=ct.x+ct.cell*(si%6+.5),ty=ct.y+ct.row*(Math.floor(si/6)+.5);if(sl.age>=.25){piece(ctx,tx,ty,ct.rx,ct.ry,sl.width,(si%3-1)*.07);}else{var t=sl.age/.25,e=1-Math.pow(1-t,3),start=cutGeometry(w,h,land,sl.width);piece(ctx,start.tipX*(1-e)+tx*e,start.tipY*(1-e)+ty*e-Math.sin(t*Math.PI)*12,sz*.55*(1-e)+ct.rx*e,sz*.48*(1-e)+ct.ry*e,sl.width,geom.angle*(1-e));}}var plunge=knife>0?Math.sin((1-knife/.18)*Math.PI):0,kx=geom.tipX-Math.sin(.18)*38,ky=geom.tipY-Math.cos(.18)*38-38*(1-plunge);ctx.save();ctx.translate(kx,ky);ctx.rotate(-.18);var steel=ctx.createLinearGradient(0,0,0,58);steel.addColorStop(0,'#d5e0dd');steel.addColorStop(.7,'#fff');steel.addColorStop(1,'#9caeaa');round(ctx,-52,-20,100,58,7,steel);ctx.fillStyle='#243d46';ctx.fillRect(34,-14,48,16);ctx.fillStyle='#bb9e6d';ctx.fillRect(40,-11,35,3);ctx.restore();ctx.restore();var overdue=frac>1,phase=overdue?(.5+.5*Math.sin(tick*8)):Math.max(0,frac);var beatX=gx+gw-22,beatY=gy-28;ctx.fillStyle=overdue?'#dc633f':'#50b7ad';ctx.globalAlpha=.08+.14*phase;ctx.beginPath();ctx.arc(beatX,beatY,22,0,7);ctx.fill();ctx.globalAlpha=1;ctx.strokeStyle=overdue?'#dc633f':'#50b7ad';ctx.lineWidth=slices.length<6&&frac>=.8&&frac<=1?5:3;ctx.beginPath();ctx.arc(beatX,beatY,12+6*(1-phase),0,7);ctx.stroke();if(overdue&&countdown<=0){text('目標を過ぎた・切って次へ',land?w*.76:w*.5,gy+96,13,'#dc633f');}if(countdown>0){text('約16秒で完成・18枚を目指そう',rx,ry+62,13,'#766157');round(ctx,rx-46,ry-44,92,88,24,'#fffaf0ed');text(String(Math.ceil(countdown/.6)),rx,ry+17,48,'#e8798e');}else if(pop>0){ctx.globalAlpha=Math.min(1,pop*5);text(label,land?w*.75:w*.5,h*(land?.48:.515)-(1-pop/.65)*8,land?27:24,labelColor);ctx.globalAlpha=1;}var bx=land?w*.57:w*.15,by=h*(land?.61:.95),bw=land?w*.35:w*.7;round(ctx,bx,by,bw,4,2,'#dfd5bf');round(ctx,bx,by,bw*Math.max(0,1-elapsed/16.2),4,2,'#50a99f');text('完成まで あと'+Math.ceil(Math.max(0,16.2-elapsed))+'秒',bx+bw/2,by-9,13,'#766157');}
+if(state==='result'){tray(ctx,land?w*.05:w*.06,h*(land?.18:.36),land?w*.43:w*.88,h*(land?.64:.29),slices.length);text('ひと切れずつ、私のもよう。',land?w*.265:w*.5,h*(land?.9:.69)-16,13,'#766157');}ctx.restore();for(var k=0;k<particles.length;k++){var p=particles[k];ctx.globalAlpha=p.life*2;ctx.fillStyle=p.c;ctx.save();ctx.translate(p.x,p.y);ctx.rotate(p.life*8);ctx.fillRect(-3,-3,6,6);ctx.restore();}ctx.globalAlpha=1;}
+var STEP=1000/60,acc=0,prevNow=0;function frame(now){requestAnimationFrame(frame);if(!prevNow)prevNow=now;var dt=Math.min(250,now-prevNow);prevNow=now;acc+=dt;var steps=0;while(acc>=STEP&&steps<5){acc-=STEP;steps++;update(STEP/1000);}if(steps>=5)acc=0;draw();}requestAnimationFrame(frame);
+})();
+</script></body></html>
